@@ -31,10 +31,7 @@ export default function TeaserPage() {
       <div className="flex-1 flex flex-col items-center justify-center px-6 z-10 text-center -mt-20">
         <div className="w-full max-w-3xl space-y-8 animate-in fade-in slide-in-from-bottom-8 duration-1000">
           
-          <div className="inline-flex items-center gap-2 border border-zinc-800 bg-zinc-900/50 rounded-full px-4 py-1.5 mb-4">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-            <span className="text-xs text-zinc-400 font-medium tracking-wide">Private Beta Access Only</span>
-          </div>
+          {/* הוסר החלק של Private Beta Badge */}
 
           <h1 className="text-5xl md:text-7xl font-bold tracking-tight text-white leading-[1.1]">
             Fitness designed for <br/> 
@@ -45,7 +42,6 @@ export default function TeaserPage() {
             An intelligent AI coach that adapts to your schedule, injuries, and equipment. No rigid plans. Just consistency.
           </p>
 
-          {/* הטופס החדש */}
           <div className="pt-4 w-full">
              <WaitlistForm />
              <p className="text-xs text-zinc-600 mt-6">
