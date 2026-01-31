@@ -1,682 +1,723 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useRouter, useParams } from 'next/navigation';
+import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { supabaseBrowser } from '../../lib/supabaseClient';
-import confetti from 'canvas-confetti';
+import { format } from 'date-fns';
 
-// --- Types ---
-type ExerciseSet = {
-  setNumber: number;
-  weight: string;
-  reps: string;
-  isBodyweight: boolean;
-  completed: boolean;
+// ---------- Types ----------
+const DOW_ORDER = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
+type WeekdayCode = (typeof DOW_ORDER)[number];
+type DayKind = 'main' | 'recovery' | 'bonus';
+
+type DetailedWorkout = {
+  title: string;
+  focus?: string;
+  duration_min?: number;
+  instructions: string[];
+  notes?: string;
 };
 
-type WorkoutBlock = {
+type DayPlan = {
+  weekday: string;
+  workouts: string[];
+  kind?: DayKind;
+  detailed_workouts?: DetailedWorkout[];
+};
+
+type WeekPlan = {
+  days: DayPlan[];
+  notes: string;
+};
+
+type WorkoutLog = {
   id: string;
-  type: 'warmup' | 'exercise' | 'cooldown' | 'endurance_session';
-  category: 'strength' | 'mobility' | 'cardio';
-  name: string;
-  subtitle?: string;
-  instructions?: string[];
-  sets: ExerciseSet[];
-  isCompleted?: boolean; 
+  user_id: string;
+  workout_date: string;
+  status: 'completed' | 'partial' | 'skipped';
+  rpe?: number;
 };
 
-type WorkoutData = {
-  planId: string;
-  dayPlan: any;
-  generalNotes?: string;
-  blocks: WorkoutBlock[];
-  isPureEnduranceDay: boolean;
+export type FixedActivity = {
+  id: string;
+  day: string;
+  activity: string;
+  time?: string;
 };
 
-// --- Helper: Parsing Logic ---
-function parseWorkoutToBlocks(dayPlan: any): WorkoutData {
-  const blocks: WorkoutBlock[] = [];
-  let globalBlockIndex = 0;
+type Profile = {
+  id: string;
+  email: string | null;
+  full_name: string | null;
+  week_start_dow: string | null;
+  goal: string | null;
+  level: string | null;
+  default_days_available: string[] | null;
+  fixed_activities?: FixedActivity[] | null;
+};
 
-  const cleanTitle = (t: string) => t.replace(/[:|-]$/, '').trim();
-  const sourceList = dayPlan.detailed_workouts || [];
+// ---------- Helpers ----------
 
-  if (sourceList.length === 0 && dayPlan.workouts) {
-    sourceList.push({ title: 'Workout', instructions: dayPlan.workouts, focus: 'mixed' });
+function normalizeWeekday(label: string | null | undefined): WeekdayCode | null {
+  if (!label) return null;
+  const base = label.slice(0, 3).toLowerCase();
+  switch (base) { case 'sun': return 'Sun'; case 'mon': return 'Mon'; case 'tue': return 'Tue'; case 'wed': return 'Wed'; case 'thu': return 'Thu'; case 'fri': return 'Fri'; case 'sat': return 'Sat'; default: return null; }
+}
+
+function getStartOfWeek(weekStart: WeekdayCode): Date {
+  const today = new Date();
+  const todayIdx = today.getDay(); 
+  const startIdx = DOW_ORDER.indexOf(weekStart);
+  const diff = (todayIdx - startIdx + 7) % 7;
+  const start = new Date(today);
+  start.setHours(0, 0, 0, 0);
+  start.setDate(today.getDate() - diff);
+  return start;
+}
+
+function getStartOfWeekFrom(baseDate: Date, weekStart: WeekdayCode): Date {
+  const date = new Date(baseDate);
+  const dayIdx = date.getDay();
+  const startIdx = DOW_ORDER.indexOf(weekStart);
+  const diff = (dayIdx - startIdx + 7) % 7;
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() - diff);
+  return date;
+}
+
+function toLocalISO(date: Date): string {
+  const offset = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 10);
+}
+
+function orderDays(days: DayPlan[], weekStart: WeekdayCode): DayPlan[] {
+  const startIdx = DOW_ORDER.indexOf(weekStart);
+  const getOffset = (weekday: string): number => {
+    const code = normalizeWeekday(weekday) ?? 'Mon';
+    const idx = DOW_ORDER.indexOf(code);
+    return (idx - startIdx + 7) % 7;
+  };
+  return [...days].sort((a, b) => getOffset(a.weekday) - getOffset(b.weekday));
+}
+
+function dateForWeekday(startOfWeek: Date, weekStart: WeekdayCode, targetDay: WeekdayCode): Date {
+  const startIdx = DOW_ORDER.indexOf(weekStart);
+  const targetIdx = DOW_ORDER.indexOf(targetDay);
+  const offset = (targetIdx - startIdx + 7) % 7;
+  const d = new Date(startOfWeek);
+  d.setDate(startOfWeek.getDate() + offset);
+  return d;
+}
+
+function getFriendlyName(profile: Profile): string {
+  if (profile.full_name && profile.full_name.trim().length > 0) {
+    return profile.full_name.trim().split(' ')[0];
   }
-
-  // בדיקות סוג אימון
-  const hasStrength = sourceList.some((dw: any) => 
-    ['strength', 'hypertrophy', 'mixed', 'resistance', 'powerlifting', 'hiit'].includes(dw.focus?.toLowerCase() || '')
-  );
-  
-  const hasCardio = sourceList.some((dw: any) => 
-    ['cardio', 'endurance', 'run', 'swim', 'bike', 'cycling'].includes(dw.focus?.toLowerCase() || '')
-  );
-
-  // יום אירובי טהור = יש אירובי ואין כוח בכלל
-  const isPureEnduranceDay = hasCardio && !hasStrength;
-
-  sourceList.forEach((dw: any) => {
-    const titleLower = dw.title?.toLowerCase() || '';
-    const focus = dw.focus?.toLowerCase() || 'strength';
-    
-    // 1. Warmup / Cooldown Detection
-    const isBlockWarmup = titleLower.includes('warm') || (titleLower.includes('mobility') && focus !== 'mobility'); 
-    const isBlockCooldown = titleLower.includes('cool') || (titleLower.includes('stretch') && focus !== 'mobility');
-
-    if (isBlockWarmup || isBlockCooldown) {
-      blocks.push({
-        id: `block-${globalBlockIndex++}`,
-        type: isBlockWarmup ? 'warmup' : 'cooldown',
-        category: 'cardio',
-        name: isBlockWarmup ? 'Warmup' : 'Cooldown',
-        subtitle: dw.instructions?.join('\n'), 
-        instructions: dw.instructions || [],
-        sets: [],
-        isCompleted: false
-      });
-      return;
-    }
-
-    // 2. Endurance Session Block
-    if (focus === 'cardio' || focus === 'endurance') {
-         blocks.push({
-            id: `block-${globalBlockIndex++}`,
-            type: 'endurance_session',
-            category: 'cardio',
-            name: cleanTitle(dw.title),
-            subtitle: dw.instructions?.join('\n'),
-            instructions: dw.instructions || [],
-            sets: [],
-            isCompleted: false
-         });
-         return;
-    }
-
-    // 3. Exercise Parsing
-    if (dw.instructions && Array.isArray(dw.instructions)) {
-      let currentExercise: WorkoutBlock | null = null;
-      let pendingInstructions: string[] = [];
-
-      dw.instructions.forEach((line: string) => {
-        const exerciseMatch = line.match(/^(.+?)(?::|-)?\s+(\d+)\s*(?:sets|x|rounds)/i);
-        const isMobilityItem = focus === 'mobility' && (line.match(/^\d+\./) || line.trim().length > 3);
-
-        if (exerciseMatch) {
-          // STRENGTH
-          const name = exerciseMatch[1].trim();
-          const setsCount = parseInt(exerciseMatch[2]);
-          const repsMatch = line.match(/(\d+(?:-\d+)?)\s*reps/i);
-          const weightMatch = line.match(/(\d+(?:\.\d+)?)\s*(?:kg|lbs)/i);
-          const timeMatch = line.match(/(\d+)\s*(?:sec|min)/i);
-
-          if (currentExercise) {
-             if (pendingInstructions.length > 0) currentExercise.instructions = pendingInstructions;
-             blocks.push(currentExercise);
-             pendingInstructions = [];
-          }
-
-          currentExercise = {
-            id: `block-${globalBlockIndex++}`,
-            type: 'exercise',
-            category: focus === 'mobility' ? 'mobility' : 'strength',
-            name: cleanTitle(name),
-            subtitle: line,
-            instructions: [],
-            sets: Array.from({ length: setsCount }).map((_, i) => ({
-                setNumber: i + 1,
-                weight: weightMatch ? weightMatch[1] : '',
-                reps: repsMatch ? repsMatch[1] : (timeMatch ? timeMatch[0] : ''),
-                isBodyweight: !weightMatch, 
-                completed: false
-            }))
-          };
-
-        } else if (isMobilityItem && !exerciseMatch) {
-           // MOBILITY
-           if (currentExercise) {
-                if (pendingInstructions.length > 0) currentExercise.instructions = pendingInstructions;
-                blocks.push(currentExercise);
-                pendingInstructions = [];
-           }
-           const cleanName = line.replace(/^\d+\.\s*/, '').split(':')[0].trim();
-           currentExercise = {
-               id: `block-${globalBlockIndex++}`,
-               type: 'exercise',
-               category: 'mobility',
-               name: cleanName,
-               subtitle: line,
-               instructions: [],
-               sets: [{ setNumber: 1, weight: '', reps: '1', isBodyweight: true, completed: false }]
-           };
-
-        } else {
-          // Notes
-          if (currentExercise) {
-            currentExercise.instructions?.push(line);
-          } else {
-            pendingInstructions.push(line);
-          }
-        }
-      });
-
-      if (currentExercise) {
-        if (pendingInstructions.length > 0) (currentExercise as WorkoutBlock).instructions = pendingInstructions;
-        blocks.push(currentExercise);
-      }
-    }
-  });
-
-  return { 
-      planId: dayPlan.id || 'temp',
-      dayPlan,
-      generalNotes: '',
-      blocks,
-      isPureEnduranceDay
-  };
+  return 'Friend';
 }
 
-// --- Components ---
-
-function Stopwatch({ autoStart = false, label }: { autoStart?: boolean, label?: string }) {
-    const [seconds, setSeconds] = useState(0);
-    const [isRunning, setIsRunning] = useState(autoStart);
-    
-    useEffect(() => {
-        let interval: NodeJS.Timeout;
-        if (isRunning) {
-            interval = setInterval(() => setSeconds(s => s + 1), 1000);
-        }
-        return () => clearInterval(interval);
-    }, [isRunning]);
-
-    const format = (s: number) => {
-        const h = Math.floor(s / 3600);
-        const m = Math.floor((s % 3600) / 60);
-        const sec = s % 60;
-        return `${h > 0 ? h + ':' : ''}${m < 10 ? '0' : ''}${m}:${sec < 10 ? '0' : ''}${sec}`;
-    };
-
-    return (
-        <div className="flex flex-col items-center">
-             {label && <div className="text-zinc-500 text-xs mb-1 uppercase tracking-wider">{label}</div>}
-             <div className="text-5xl font-mono font-bold text-white tabular-nums tracking-tight">
-                 {format(seconds)}
-             </div>
-             <div className="flex gap-3 mt-4">
-                 <button onClick={() => setIsRunning(!isRunning)} className={`px-6 py-2 rounded-full font-bold text-sm ${isRunning ? 'bg-zinc-800 text-red-400' : 'bg-emerald-500 text-black'}`}>
-                     {isRunning ? 'PAUSE' : 'START'}
-                 </button>
-             </div>
-        </div>
-    );
+function formatPrimaryDays(defaultDays: string[] | null): string | null {
+  if (!defaultDays || defaultDays.length === 0) return null;
+  const order: WeekdayCode[] = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const normalized = defaultDays.map((d) => normalizeWeekday(d)).filter(Boolean) as WeekdayCode[];
+  if (normalized.length === 0) return null;
+  const sorted = [...normalized].sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  return sorted.join(' · ');
 }
 
-function SessionTimerHeader() {
-    const [seconds, setSeconds] = useState(0);
-    useEffect(() => {
-        const interval = setInterval(() => setSeconds(s => s + 1), 1000);
-        return () => clearInterval(interval);
-    }, []);
-    const format = (s: number) => {
-        const mins = Math.floor(s / 60);
-        const secs = s % 60;
-        return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
-    };
-    return (
-        <div className="text-zinc-400 font-mono text-sm bg-zinc-900/50 px-3 py-1 rounded-full border border-zinc-800">
-            {format(seconds)}
-        </div>
-    );
+function kindToBadge(kind: DayKind | undefined, isFixed?: boolean): { label: string; className: string } {
+  if (isFixed) {
+    return { label: 'Fixed Activity', className: 'border-indigo-500 bg-indigo-500/10 text-indigo-300' };
+  }
+  switch (kind) {
+    case 'main': return { label: 'Main Workout', className: 'border-emerald-500 bg-emerald-500/10 text-emerald-300' };
+    case 'bonus': return { label: 'Bonus', className: 'border-indigo-400 bg-indigo-500/10 text-indigo-200' };
+    case 'recovery': default: return { label: 'Rest', className: 'border-zinc-700 bg-zinc-800/60 text-zinc-400' };
+  }
 }
 
-function RestTimer({ isActive, onReset }: { isActive: boolean; onReset: () => void }) {
-  const [timeLeft, setTimeLeft] = useState(90);
-  const [running, setRunning] = useState(false);
-
-  useEffect(() => {
-    if (isActive) { setRunning(true); setTimeLeft(90); }
-  }, [isActive]);
-
-  useEffect(() => {
-    let interval: NodeJS.Timeout | null = null;
-    if (running && timeLeft > 0) {
-      interval = setInterval(() => setTimeLeft((t) => t - 1), 1000);
-    } else if (timeLeft === 0) {
-      setRunning(false);
-      onReset();
-    }
-    return () => { if (interval) clearInterval(interval); };
-  }, [running, timeLeft, onReset]);
-
-  if (!running && !isActive) return null;
-
-  const formatTime = (s: number) => {
-    const m = Math.floor(s / 60);
-    const sec = s % 60;
-    return `${m}:${sec < 10 ? '0' : ''}${sec}`;
-  };
-
-  return (
-    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-zinc-900 border border-zinc-700 p-2 pr-4 rounded-full shadow-2xl z-50 animate-in slide-in-from-bottom-4">
-      <div className="bg-zinc-800 rounded-full w-10 h-10 flex items-center justify-center text-xs font-bold text-zinc-400">REST</div>
-      <div className="flex flex-col items-center w-16">
-          <span className="font-mono text-xl text-white font-bold">{formatTime(timeLeft)}</span>
-      </div>
-      <button onClick={() => setRunning(!running)} className={`w-8 h-8 rounded-full flex items-center justify-center text-white transition ${running ? 'bg-amber-600' : 'bg-emerald-600'}`}>
-        {running ? '⏸' : '▶'}
-      </button>
-      <button onClick={() => setTimeLeft(t => t + 30)} className="text-[10px] bg-zinc-800 px-1.5 rounded text-zinc-400 hover:text-white ml-2">+30s</button>
-    </div>
-  );
+function inferKind(day: DayPlan): DayKind {
+  if (day.kind) return day.kind;
+  if (!day.workouts || day.workouts.length === 0) return 'recovery';
+  return 'main';
 }
 
-function EnduranceSessionView({ 
-    block, 
-    onFinish, 
-    isSaving,
-    isPureSession 
-}: { 
-    block: WorkoutBlock, 
-    onFinish: () => void, 
-    isSaving: boolean,
-    isPureSession: boolean
-}) {
-    const lowerName = block.name.toLowerCase();
-    const isRide = lowerName.includes('cycl') || lowerName.includes('bik') || lowerName.includes('rid');
-    const finishLabel = isRide ? 'Finish Ride 🏁' : (lowerName.includes('run') ? 'Finish Run 🏁' : 'Finish Session 🏁');
+// ---------- Component ----------
 
-    return (
-        <div className="min-h-screen bg-black text-white flex flex-col relative pb-10">
-            <div className="absolute top-0 left-0 w-full h-1/2 bg-gradient-to-b from-indigo-900/20 to-transparent pointer-events-none" />
-            
-            <header className="px-6 py-6 z-10">
-                <div className="inline-flex items-center gap-2 bg-indigo-500/20 text-indigo-300 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider mb-4">
-                    <span>{isRide ? '🚴 Cycling' : '🏃 Endurance'}</span>
-                </div>
-                <h1 className="text-4xl font-bold leading-tight">{block.name}</h1>
-                <p className="text-zinc-400 mt-2 text-lg whitespace-pre-line">{block.subtitle || 'Steady state effort'}</p>
-            </header>
-
-            <div className="flex-1 flex flex-col items-center justify-center z-10 px-6">
-                <div className="w-full max-w-sm bg-zinc-900/40 border border-zinc-800 backdrop-blur-md rounded-3xl p-10 shadow-2xl">
-                    <Stopwatch autoStart={true} label="Session Time" />
-                </div>
-                
-                {block.instructions && block.instructions.length > 0 && (
-                    <div className="mt-8 bg-black/40 border border-zinc-800 rounded-xl p-4 w-full max-w-sm">
-                        <h3 className="text-sm font-bold text-zinc-300 mb-2">Coach Notes:</h3>
-                        <ul className="space-y-2">
-                            {block.instructions.map((inst, i) => (
-                                <li key={i} className="text-sm text-zinc-400 flex items-start gap-2">
-                                    <span className="text-indigo-500 mt-1">•</span> {inst}
-                                </li>
-                            ))}
-                        </ul>
-                    </div>
-                )}
-            </div>
-
-            <div className="px-6 z-10 mt-6">
-                 <button 
-                    onClick={onFinish}
-                    disabled={isSaving}
-                    className="w-full py-5 bg-white text-black text-xl font-bold rounded-2xl shadow-lg hover:bg-zinc-200 active:scale-95 transition-all"
-                >
-                    {isSaving ? 'Saving...' : finishLabel}
-                </button>
-            </div>
-        </div>
-    );
-}
-
-// --- Main Page ---
-export default function ActiveWorkoutPage() {
-  const params = useParams();
-  const router = useRouter();
+export default function DashboardPage() {
   const supabase = supabaseBrowser();
-  
-  const dateStr = Array.isArray(params?.date) ? params.date[0] : params?.date;
+  const router = useRouter();
 
   const [loading, setLoading] = useState(true);
-  const [workoutData, setWorkoutData] = useState<WorkoutData | null>(null);
-  const [isSaving, setIsSaving] = useState(false);
-  const [triggerRest, setTriggerRest] = useState(false);
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
   
-  const [activeEnduranceBlockId, setActiveEnduranceBlockId] = useState<string | null>(null);
+  // Plans
+  const [currentWeekPlan, setCurrentWeekPlan] = useState<WeekPlan | null>(null);
+  const [nextWeekPlan, setNextWeekPlan] = useState<WeekPlan | null>(null);
+  
+  // UI State
+  const [viewingTab, setViewingTab] = useState<'current' | 'next'>('current');
+  const [selectedDay, setSelectedDay] = useState<DayPlan | null>(null);
+  const [showAdjustBox, setShowAdjustBox] = useState(false);
+  const [regenerateReason, setRegenerateReason] = useState('');
+  
+  // Error Handling
+  const [generationError, setGenerationError] = useState<{title: string, msg: string} | null>(null);
 
+  // Meta
+  const [generatedAt, setGeneratedAt] = useState<string | null>(null);
+  const [trainingWeekNumber, setTrainingWeekNumber] = useState<number | null>(null);
+  const [logs, setLogs] = useState<Record<string, WorkoutLog>>({});
+  const [generating, setGenerating] = useState(false);
+
+  // ---------- Load everything ----------
   useEffect(() => {
-    const loadPlanAndHistory = async () => {
-      try {
-        if (!dateStr) return;
-        const { data: { user } } = await supabase.auth.getUser();
-        if (!user) { router.push('/'); return; }
-
-        const { data: plans } = await supabase
-          .from('week_plans')
-          .select('*')
-          .eq('user_id', user.id)
-          .order('week_start_date', { ascending: false });
-
-        if (!plans || plans.length === 0) { router.push('/dashboard'); return; }
-
-        const currentPlanRow = plans[0];
-        const planContent = currentPlanRow.plan.plan ? currentPlanRow.plan.plan : currentPlanRow.plan;
-        
-        // --- FIX: Robust Date Parsing (Timezone Safe) ---
-        // Instead of new Date(dateStr) which might shift due to timezone,
-        // we parse "YYYY-MM-DD" directly to get the intended date.
-        const [y, m, d] = (dateStr as string).split('-').map(Number);
-        const dateObj = new Date(y, m - 1, d); // Construct date in local time
-        
-        if (isNaN(dateObj.getTime())) {
-             console.error("Invalid date");
-             router.push('/dashboard'); 
+    const loadEverything = async () => {
+      const { data: userData } = await supabase.auth.getUser();
+      if (!userData.user) {
+        window.location.href = '/';
         return;
       }
+      setUserId(userData.user.id);
 
-        const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'short' });
-        
-        // Find the day in the plan
-        const dayPlan = planContent.days.find((d: any) => 
-            d.weekday.toLowerCase().startsWith(dayName.toLowerCase())
-        );
+      // 1) Load profile
+      const { data: profileData } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userData.user.id)
+        .maybeSingle();
 
-        if (!dayPlan) { 
-            console.error("Day not found in plan for:", dayName);
-            // Don't crash, just stop loading and show message
-            setLoading(false);
+      if (!profileData) {
+        window.location.href = '/onboarding';
         return;
       }
+      const typedProfile = profileData as Profile;
+      setProfile(typedProfile);
 
-        let parsedData = parseWorkoutToBlocks(dayPlan);
+      // Week calc
+      const weekStartCode = normalizeWeekday(typedProfile.week_start_dow) ?? ('Mon' as WeekdayCode);
+      const startOfWeek = getStartOfWeek(weekStartCode);
+      
+      const offset = startOfWeek.getTimezoneOffset() * 60000;
+      const currentISO = new Date(startOfWeek.getTime() - offset).toISOString().slice(0, 10);
+      
+      const nextWeekStart = new Date(startOfWeek);
+      nextWeekStart.setDate(startOfWeek.getDate() + 7);
+      const nextOffset = nextWeekStart.getTimezoneOffset() * 60000;
+      const nextISO = new Date(nextWeekStart.getTime() - nextOffset).toISOString().slice(0, 10);
 
-        // Fetch History
-        if (!parsedData.isPureEnduranceDay) {
-            const { data: lastLogs } = await supabase
-                .from('workout_logs')
-                .select('details')
-                .eq('user_id', user.id)
-                .eq('status', 'completed')
-                .order('workout_date', { ascending: false })
-                .limit(5);
+      // 2) Load Plans
+      const { data: plans } = await supabase
+        .from('week_plans')
+        .select('*')
+        .eq('user_id', userData.user.id)
+        .in('week_start_date', [currentISO, nextISO]);
 
-            if (lastLogs && lastLogs.length > 0) {
-                const historyMap: Record<string, string> = {};
-                lastLogs.forEach((log: any) => {
-                    if (Array.isArray(log.details)) {
-                        log.details.forEach((block: any) => {
-                            if (block.type === 'exercise' && block.sets) {
-                                const completedSets = block.sets.filter((s:any) => s.completed);
-                                if (completedSets.length > 0) {
-                                    const lastSet = completedSets[completedSets.length - 1];
-                                    if (!historyMap[block.name] && lastSet.weight) {
-                                        historyMap[block.name] = lastSet.weight;
-                                    }
-                                }
-                            }
-                        });
-                    }
-                });
+      if (plans) {
+        const current = plans.find((p: any) => p.week_start_date === currentISO);
+        const next = plans.find((p: any) => p.week_start_date === nextISO);
 
-                parsedData.blocks = parsedData.blocks.map(block => {
-                    if (block.type === 'exercise' && historyMap[block.name]) {
-                        const prevWeight = historyMap[block.name];
-                        return {
-                            ...block,
-                            sets: block.sets.map(set => ({
-                                ...set,
-                                weight: set.weight || prevWeight,
-                                isBodyweight: false
-                            }))
-                        };
-                    }
-                    return block;
-                });
-            }
+        if (current) {
+          const actualPlan = current.plan.plan ? current.plan.plan : current.plan;
+          setCurrentWeekPlan(actualPlan as WeekPlan);
+          setGeneratedAt(current.generated_at);
         }
 
-        setWorkoutData(parsedData);
-      } catch (err) {
-        console.error("Error loading workout:", err);
-      } finally {
-        setLoading(false);
+        if (next) {
+          const actualPlan = next.plan.plan ? next.plan.plan : next.plan;
+          setNextWeekPlan(actualPlan as WeekPlan);
+        }
       }
-    };
-    loadPlanAndHistory();
-  }, [dateStr, router, supabase]);
 
-  const updateSet = (blockIndex: number, setIndex: number, field: keyof ExerciseSet, value: any) => {
-    if (!workoutData) return;
-    const newBlocks = [...workoutData.blocks];
-    if (newBlocks[blockIndex].type !== 'exercise') return;
-
-    const newSets = [...newBlocks[blockIndex].sets];
-    
-    if (field === 'isBodyweight') {
-        const isNowBW = value === true;
-        newSets[setIndex] = { 
-            ...newSets[setIndex], 
-            isBodyweight: isNowBW,
-            weight: isNowBW ? '' : newSets[setIndex].weight
-        };
-    } else {
-        newSets[setIndex] = { ...newSets[setIndex], [field]: value };
-    }
-
-    if (field === 'completed' && value === true && newBlocks[blockIndex].category !== 'mobility') {
-        setTriggerRest(true);
-        setTimeout(() => setTriggerRest(false), 100); 
-    }
-
-    newBlocks[blockIndex] = { ...newBlocks[blockIndex], sets: newSets };
-    setWorkoutData({ ...workoutData, blocks: newBlocks });
-  };
-
-  const toggleBlockCompletion = (blockIndex: number) => {
-    if (!workoutData) return;
-    const newBlocks = [...workoutData.blocks];
-    newBlocks[blockIndex].isCompleted = !newBlocks[blockIndex].isCompleted;
-    setWorkoutData({ ...workoutData, blocks: newBlocks });
-  };
-
-  const markEnduranceBlockComplete = (blockId: string) => {
-      if (!workoutData) return;
-      const newBlocks = workoutData.blocks.map(b => 
-          b.id === blockId ? { ...b, isCompleted: true } : b
-      );
-      setWorkoutData({ ...workoutData, blocks: newBlocks });
-      setActiveEnduranceBlockId(null);
-  };
-
-  const finishWorkout = async () => {
-    if (!workoutData || !dateStr) return;
-    setIsSaving(true);
-    
-    confetti({ particleCount: 150, spread: 70, origin: { y: 0.6 }, colors: ['#34D399', '#ffffff', '#10B981'] });
-
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
-
-    const detailedLog = workoutData.blocks.map(b => ({
-        name: b.name,
-        type: b.type,
-        completed: b.type === 'exercise' ? undefined : b.isCompleted,
-        sets: b.type === 'exercise' ? b.sets.map(s => ({
-            set: s.setNumber,
-            weight: s.weight,
-            reps: s.reps,
-            is_bodyweight: s.isBodyweight,
-            completed: s.completed
-        })) : undefined
-    }));
-
-    const { error } = await supabase.from('workout_logs').upsert({
-      user_id: user.id,
-      workout_date: dateStr,
-      status: 'completed',
-      details: detailedLog 
-    }, { onConflict: 'user_id, workout_date' });
-
-    if (error) { alert('Error saving workout'); setIsSaving(false); } 
-    else { setTimeout(() => router.push('/dashboard'), 2000); }
-  };
-
-  if (loading) return <div className="min-h-screen bg-black flex items-center justify-center text-zinc-500">Loading workout...</div>;
-  if (!workoutData) return <div className="min-h-screen bg-black flex items-center justify-center text-white">Workout data unavailable.</div>;
-
-  // 1. Pure Endurance
-  if (workoutData.isPureEnduranceDay) {
-      const mainBlock = workoutData.blocks.find(b => b.type === 'endurance_session') || workoutData.blocks[0];
-      return <EnduranceSessionView block={mainBlock} onFinish={finishWorkout} isSaving={isSaving} isPureSession={true} />;
-  }
-
-  // 2. Active Endurance Block (Mixed)
-  if (activeEnduranceBlockId) {
-      const activeBlock = workoutData.blocks.find(b => b.id === activeEnduranceBlockId);
-      if (activeBlock) {
-          return <EnduranceSessionView block={activeBlock} onFinish={() => markEnduranceBlockComplete(activeBlock.id)} isSaving={false} isPureSession={false} />;
+      // 3) Load Logs
+      const { data: logsData } = await supabase
+        .from('workout_logs')
+        .select('*')
+        .eq('user_id', userData.user.id);
+      
+      if (logsData) {
+        const logsMap: Record<string, WorkoutLog> = {};
+        logsData.forEach((log: any) => {
+          logsMap[log.workout_date] = log as WorkoutLog;
+        });
+        setLogs(logsMap);
       }
-  }
 
-  // 3. Main List
-  let totalTrackables = 0;
-  let doneTrackables = 0;
-  workoutData.blocks.forEach(b => {
-      if (b.type === 'exercise') {
-          totalTrackables += b.sets.length;
-          doneTrackables += b.sets.filter(s => s.completed).length;
+      // 4) Week Number
+      const { data: firstPlan } = await supabase
+        .from('week_plans')
+        .select('generated_at')
+        .eq('user_id', userData.user.id)
+        .order('generated_at', { ascending: true })
+        .limit(1)
+        .maybeSingle();
+        
+      if (firstPlan) {
+        const firstGen = new Date(firstPlan.generated_at);
+        const firstStart = getStartOfWeekFrom(firstGen, weekStartCode);
+        const currentStart = getStartOfWeekFrom(new Date(), weekStartCode);
+        const diffWeeks = Math.round((currentStart.getTime() - firstStart.getTime()) / (7 * 24 * 60 * 60 * 1000));
+        setTrainingWeekNumber(diffWeeks + 1);
       } else {
-          totalTrackables += 1;
-          if (b.isCompleted) doneTrackables += 1;
+        setTrainingWeekNumber(1);
       }
-  });
-  const displayProgress = totalTrackables === 0 ? 0 : Math.round((doneTrackables / totalTrackables) * 100);
+
+      setLoading(false);
+    };
+
+    loadEverything();
+  }, [supabase]); 
+
+  // ---------- Actions ----------
+
+  const handleToggleLog = async (dateStr: string) => {
+    if (!userId) return;
+    const isCompleted = logs[dateStr]?.status === 'completed';
+    const newStatus = isCompleted ? null : 'completed';
+
+    const newLogs = { ...logs };
+    if (newStatus) {
+      newLogs[dateStr] = { id: 'opt', user_id: userId, workout_date: dateStr, status: 'completed' };
+    } else {
+      delete newLogs[dateStr];
+    }
+    setLogs(newLogs);
+
+    if (newStatus === 'completed') {
+      await supabase.from('workout_logs').upsert({ user_id: userId, workout_date: dateStr, status: 'completed' }, { onConflict: 'user_id, workout_date' });
+    } else {
+      await supabase.from('workout_logs').delete().eq('user_id', userId).eq('workout_date', dateStr);
+    }
+  };
+
+  const handleGenerate = async () => {
+    if (!profile) return;
+    setGenerating(true);
+    setGenerationError(null);
+
+    // לוגיקה לחישוב התאריך הנכון לשליחה
+    const weekStartCode = normalizeWeekday(profile.week_start_dow) ?? 'Mon';
+    const startOfWeek = getStartOfWeek(weekStartCode);
+    const offset = startOfWeek.getTimezoneOffset() * 60000;
+    
+    // זה התאריך של השבוע הנוכחי
+    const currentWeekISO = new Date(startOfWeek.getTime() - offset).toISOString().slice(0, 10);
+    
+    // זה התאריך של שבוע הבא
+    const nextWeekDate = new Date(startOfWeek);
+    nextWeekDate.setDate(startOfWeek.getDate() + 7);
+    const nextWeekISO = new Date(nextWeekDate.getTime() - offset).toISOString().slice(0, 10);
+    
+    // ברירת מחדל: נוכחי
+    let targetDateISO = currentWeekISO;
+    
+    // אם הטאב הוא 'next', ברור שאנחנו רוצים את שבוע הבא
+    if (viewingTab === 'next') {
+        targetDateISO = nextWeekISO;
+    } 
+    // אם אנחנו ב-Current אבל אין סיבה לתיקון (regenerateReason ריק) וכבר יש לנו תוכנית,
+    // זה אומר שלחצנו על הכפתור "Generate Plan" הראשוני או "Plan Next Week", אז הכוונה היא לשבוע הבא.
+    else if (!regenerateReason && currentWeekPlan) {
+        targetDateISO = nextWeekISO;
+    }
+
+    try {
+      // אנחנו שולחים ל-API בדיוק את המבנה שהוא מכיר ואוהב
+      const res = await fetch('/api/generate-week', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          profile, 
+          lastWeek: regenerateReason ? null : currentWeekPlan,
+          planning: null, 
+          changeReason: regenerateReason || null,
+          weekStartDate: targetDateISO 
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Failed to generate plan');
+      }
+      
+      // טיפול בתשובה מה-API
+      const data = await res.json();
+      
+      // ה-API שלך מחזיר { notes, days, ... } ולא שומר לדאטאבייס בעצמו!
+      // הדשבורד צריך לשמור את זה לדאטאבייס.
+      // (זה ההבדל המרכזי בין הגרסאות)
+
+      const planToSave = {
+          notes: data.notes,
+          days: data.days
+      };
+
+      const { error: dbError } = await supabase
+          .from('week_plans')
+          .insert({
+              user_id: profile.id,
+              week_start_date: targetDateISO,
+              goal: profile.goal || 'General',
+              plan: planToSave,
+              generated_at: new Date().toISOString()
+          });
+
+      if (dbError) throw dbError;
+
+      // רענון העמוד כדי לראות את התוכנית החדשה
+      window.location.reload();
+
+    } catch (err: any) {
+        console.error(err);
+        setGenerationError({
+            title: 'Planning Failed',
+            msg: err.message || 'AI could not build the plan. Please try again.'
+        });
+    } finally {
+        setGenerating(false);
+        setShowAdjustBox(false);
+        setRegenerateReason('');
+    }
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    router.push('/');
+  };
+
+  // ---------- Rendering ----------
+
+  if (loading || !profile) return <div className="min-h-screen bg-black flex items-center justify-center text-zinc-500">Loading...</div>;
+
+  const weekStartCode = normalizeWeekday(profile.week_start_dow) ?? 'Mon';
+  
+  const activePlan = viewingTab === 'current' ? currentWeekPlan : nextWeekPlan;
+  const currentWeekStart = getStartOfWeek(weekStartCode);
+  const nextWeekStart = new Date(currentWeekStart);
+  nextWeekStart.setDate(currentWeekStart.getDate() + 7);
+  const viewedWeekStart = viewingTab === 'current' ? currentWeekStart : nextWeekStart;
+
+  const orderedDays = activePlan ? orderDays(activePlan.days, weekStartCode) : [];
+  const friendlyName = getFriendlyName(profile);
+  const primaryDaysLabel = formatPrimaryDays(profile.default_days_available);
+
+  const today = new Date();
+  today.setHours(0,0,0,0);
+  const planCreatedDate = generatedAt ? new Date(generatedAt) : new Date();
+  planCreatedDate.setHours(0,0,0,0);
+  
+  // Logic to show "Plan Next Week" only late in week
+  const currentDayIndex = DOW_ORDER.indexOf(normalizeWeekday(new Date().toLocaleDateString('en-US', {weekday:'short'}))!);
+  const startDayIndex = DOW_ORDER.indexOf(weekStartCode);
+  const daysIntoWeek = (currentDayIndex - startDayIndex + 7) % 7;
+  const showNextWeekBtn = daysIntoWeek >= 4 || !currentWeekPlan; 
 
   return (
-    <main className="min-h-screen bg-black text-white pb-40">
-      <header className="sticky top-0 bg-black/90 backdrop-blur z-20 border-b border-zinc-900 px-4 py-3 flex items-center justify-between">
-        <button onClick={() => router.back()} className="text-zinc-400 text-xs">✕ Cancel</button>
-        <div className="flex flex-col items-center">
-            <h1 className="font-bold text-sm text-white">{workoutData.dayPlan.weekday} Session</h1>
-            <div className="flex items-center gap-2 mt-1">
-               <SessionTimerHeader />
-               <span className="text-xs text-zinc-500">{displayProgress}%</span>
+    <main className="min-h-screen bg-black text-white p-6 pb-32 space-y-6">
+      
+      {/* Header */}
+      <header className="sticky top-0 bg-black/85 backdrop-blur-md z-30 -mx-6 px-6 pt-6 pb-4 border-b border-zinc-900 shadow-sm transition-all">
+        <div className="flex items-start justify-between mb-4">
+          <div>
+            <h1 className="text-xl font-bold mb-1">Your week, {friendlyName}</h1>
+            <div className="flex items-center gap-2 text-xs text-zinc-400">
+               <span className="bg-zinc-800 px-1.5 py-0.5 rounded text-zinc-300 capitalize">{profile.level}</span>
+               <span>•</span>
+               <span>{profile.goal?.replace('_', ' ')}</span>
             </div>
+            {primaryDaysLabel && (
+              <p className="text-[10px] text-zinc-500 mt-1">Main days: {primaryDaysLabel}</p>
+            )}
+          </div>
+          <div className="flex items-center gap-3">
+             <button onClick={handleLogout} className="text-xs text-zinc-400 border border-zinc-800 px-3 py-1.5 rounded-xl hover:bg-zinc-900 transition">Logout</button>
+          </div>
         </div>
-        <button onClick={finishWorkout} disabled={isSaving} className="bg-emerald-600 text-white px-3 py-1.5 rounded-full text-xs font-bold disabled:opacity-50">
-            {isSaving ? 'Saving...' : 'Finish'}
-          </button>
+
+        {nextWeekPlan && (
+          <div className="flex p-1 bg-zinc-900/80 rounded-xl w-full max-w-sm mx-auto sm:mx-0">
+            <button onClick={() => setViewingTab('current')} className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all ${viewingTab === 'current' ? 'bg-zinc-700 text-white shadow' : 'text-zinc-500 hover:text-zinc-300'}`}>Current Week</button>
+            <button onClick={() => setViewingTab('next')} className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all ${viewingTab === 'next' ? 'bg-white text-black shadow' : 'text-zinc-500 hover:text-zinc-300'}`}>Next Week</button>
+          </div>
+        )}
       </header>
 
-      <div className="h-1 w-full bg-zinc-900 sticky top-[62px] z-10">
-          <div className="h-full bg-emerald-500 transition-all duration-500" style={{ width: `${displayProgress}%` }} />
-      </div>
-
-      <div className="p-4 space-y-6 max-w-lg mx-auto mt-2">
-        {workoutData.generalNotes && (
-            <div className="bg-zinc-900/30 border border-zinc-800 p-3 rounded-xl mb-4">
-                <p className="text-xs text-zinc-400 italic">💡 {workoutData.generalNotes}</p>
-            </div>
-        )}
-
-        {workoutData.blocks.map((block, blockIndex) => {
-            if (block.type === 'warmup' || block.type === 'cooldown') {
-                return (
-                    <div key={block.id} onClick={() => toggleBlockCompletion(blockIndex)} className={`p-4 rounded-xl border flex items-center justify-between cursor-pointer transition-all ${block.isCompleted ? 'bg-emerald-900/10 border-emerald-500/30' : 'bg-zinc-900/50 border-zinc-800'}`}>
-                        <div className="flex-1">
-                            <h3 className={`font-bold ${block.type === 'warmup' ? 'text-amber-200' : 'text-indigo-200'}`}>{block.name}</h3>
-                            {block.subtitle && <p className="text-sm text-zinc-300 mt-0.5 font-medium whitespace-pre-line">{block.subtitle}</p>}
-            </div>
-                        <div className={`w-6 h-6 rounded-full border flex items-center justify-center ml-3 ${block.isCompleted ? 'bg-emerald-500 border-emerald-500 text-black' : 'border-zinc-600'}`}>{block.isCompleted && '✓'}</div>
+      {/* ERROR STATE */}
+      {generationError && (
+          <div className="bg-red-900/20 border border-red-500/50 p-6 rounded-2xl text-center space-y-4 animate-in fade-in">
+              <div className="text-3xl">⚠️</div>
+              <div>
+                  <h3 className="text-red-200 font-bold">{generationError.title}</h3>
+                  <p className="text-red-200/70 text-sm mt-1">{generationError.msg}</p>
+              </div>
+              <button onClick={handleGenerate} className="bg-red-500/20 text-red-200 border border-red-500/50 px-6 py-2 rounded-lg text-sm font-bold hover:bg-red-500/30 transition">
+                  Try Again
+              </button>
           </div>
-                );
-            }
+      )}
 
-            if (block.type === 'endurance_session') {
-                const isRide = block.name.toLowerCase().includes('bik') || block.name.toLowerCase().includes('cycl');
-                return (
-                    <div key={block.id} className="bg-zinc-900/50 border border-zinc-800 rounded-2xl p-5 mb-4 animate-in fade-in slide-in-from-bottom-4">
-                         <div className="flex justify-between items-start mb-3">
-                <div>
-                                <h2 className="text-lg font-bold text-white leading-tight">{block.name}</h2>
-                                <p className="text-sm text-emerald-400/80 font-medium mt-0.5">{block.subtitle || 'Cardio Session'}</p>
-                </div>
-                            <div className="text-2xl">{isRide ? '🚴' : '🏃'}</div>
-                  </div>
-                         <div className="mt-4">
-                             {block.isCompleted ? (
-                                 <button onClick={() => toggleBlockCompletion(blockIndex)} className="w-full py-3 bg-emerald-900/30 border border-emerald-500/50 text-emerald-400 rounded-xl font-bold flex items-center justify-center gap-2">✓ Completed</button>
-                             ) : (
-                                 <button onClick={() => setActiveEnduranceBlockId(block.id)} className="w-full py-3 bg-indigo-600 text-white rounded-xl font-bold shadow-lg hover:bg-indigo-500 active:scale-95 transition-all flex items-center justify-center gap-2">▶ Start {isRide ? 'Ride' : 'Run'}</button>
-                             )}
-                </div>
-              </div>
-                );
-            }
+      {/* --- Main Content --- */}
+      {activePlan ? (
+        <section className="space-y-4 animate-in fade-in duration-500">
+          
+          <div className="bg-zinc-900/50 border border-zinc-800 rounded-2xl p-4">
+             <p className="text-sm text-zinc-300 italic leading-relaxed">"{activePlan.notes}"</p>
+          </div>
 
-            const isMobility = block.category === 'mobility';
-            return (
-                <div key={block.id} className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-                    <div className="mb-3 pl-1">
-                        <div className="flex justify-between items-start">
-                            <h2 className="text-lg font-bold text-white leading-tight">{block.name}</h2>
-                            {isMobility && <span className="text-xs bg-indigo-500/20 text-indigo-300 px-2 py-0.5 rounded ml-2">Mobility</span>}
-                        </div>
-                        {block.subtitle && <p className="text-sm text-emerald-400/80 font-medium mt-0.5">{block.subtitle}</p>}
-              </div>
+          <div className="grid grid-cols-1 md:grid-cols-7 gap-3">
+            {orderedDays.map((day) => {
+              const dateObj = dateForWeekday(viewedWeekStart, weekStartCode, normalizeWeekday(day.weekday)!);
+              const dateStr = toLocalISO(dateObj);
+              const dateLabel = dateObj.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit' });
+              
+              const isToday = dateObj.getTime() === today.getTime();
+              
+              const kind = inferKind(day);
+              const isFixedActivity = profile.fixed_activities?.some(fa => normalizeWeekday(fa.day) === day.weekday);
+              const badge = kindToBadge(kind, !!isFixedActivity);
+              const isSelected = selectedDay?.weekday === day.weekday;
+              const log = logs[dateStr];
+              const isCompleted = log?.status === 'completed';
+              const hasWorkouts = day.workouts.length > 0;
 
-                    <div className="bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden shadow-sm">
-                        {!isMobility && (
-                            <div className="grid grid-cols-12 bg-zinc-900/50 p-2 text-[10px] text-zinc-500 uppercase font-bold tracking-wider text-center border-b border-zinc-800">
-                                <div className="col-span-2">Set</div>
-                                <div className="col-span-4">kg / BW</div>
-                                <div className="col-span-3">Reps</div>
-                                <div className="col-span-3">Done</div>
-            </div>
-                        )}
-
-                        {block.sets.map((set, setIndex) => (
-                            <div key={setIndex} className={`grid grid-cols-12 border-b last:border-0 border-zinc-800/50 items-center p-2 py-3 transition-colors ${set.completed ? 'bg-emerald-900/10' : ''}`}>
-                                {isMobility ? (
-                                    <>
-                                        <div className="col-span-9 pl-3 text-sm text-zinc-300 font-medium">Set {set.setNumber}</div>
-                                        <div className="col-span-3 flex justify-center">
-                                            <button onClick={() => updateSet(blockIndex, setIndex, 'completed', !set.completed)} className={`w-10 h-8 rounded-lg flex items-center justify-center transition-all ${set.completed ? 'bg-emerald-500 text-black shadow-lg' : 'bg-zinc-800 text-zinc-600 hover:bg-zinc-700 border border-zinc-700'}`}>
-                                                {set.completed ? '✓' : ''}
-        </button>
-                                        </div>
-                                    </>
-                                ) : (
-                                    <>
-                                        <div className="col-span-2 text-center font-bold text-zinc-500 text-xs">{set.setNumber}</div>
-                                        <div className="col-span-4 px-1 relative flex items-center gap-1">
-                                            {!set.isBodyweight ? (
-                                                <input type="number" placeholder="-" value={set.weight} onChange={(e) => updateSet(blockIndex, setIndex, 'weight', e.target.value)} className="w-full bg-zinc-900 border border-zinc-700 rounded-lg text-center py-2 text-sm text-white focus:border-emerald-500 outline-none placeholder:text-zinc-700" />
-                                            ) : (
-                                                <div className="w-full bg-zinc-800/50 border border-zinc-800 rounded-lg text-center py-2 text-xs text-zinc-400 font-medium">Bodyweight</div>
-                                            )}
-                                            <button onClick={() => updateSet(blockIndex, setIndex, 'isBodyweight', !set.isBodyweight)} className={`absolute -top-1.5 -right-0.5 text-[8px] px-1 rounded border ${set.isBodyweight ? 'bg-indigo-500 border-indigo-500 text-white' : 'bg-zinc-800 border-zinc-700 text-zinc-500'}`}>BW</button>
-                                        </div>
-                                        <div className="col-span-3 px-1">
-                                            <input type="number" placeholder="-" value={set.reps} onChange={(e) => updateSet(blockIndex, setIndex, 'reps', e.target.value)} className="w-full bg-zinc-900 border border-zinc-700 rounded-lg text-center py-2 text-sm text-white focus:border-emerald-500 outline-none placeholder:text-zinc-700" />
-                                        </div>
-                                        <div className="col-span-3 flex justify-center">
-                                            <button onClick={() => updateSet(blockIndex, setIndex, 'completed', !set.completed)} className={`w-10 h-8 rounded-lg flex items-center justify-center transition-all ${set.completed ? 'bg-emerald-500 text-black shadow-lg' : 'bg-zinc-800 text-zinc-600 hover:bg-zinc-700 border border-zinc-700'}`}>
-                                                {set.completed ? '✓' : ''}
-                                            </button>
-                                        </div>
-                                    </>
-                                )}
-                            </div>
-                        ))}
+              return (
+                <div 
+                  key={day.weekday}
+                  onClick={() => setSelectedDay(isSelected ? null : day)}
+                  className={`
+                    relative group flex flex-col h-full cursor-pointer
+                    rounded-2xl p-4 border-2 transition-all duration-200
+                    ${isCompleted ? 'bg-emerald-950/20 border-emerald-500/50' : 'bg-zinc-950'}
+                    ${!isCompleted && isToday ? 'border-white bg-zinc-900 shadow-[0_0_20px_rgba(255,255,255,0.08)]' : ''}
+                    ${!isCompleted && !isToday && (kind === 'bonus' || isFixedActivity) ? 'border-indigo-500/40 hover:border-indigo-400' : ''}
+                    ${!isCompleted && !isToday && kind === 'main' && !isFixedActivity ? 'border-zinc-800 hover:border-zinc-600' : ''}
+                    ${!isCompleted && !isToday && kind === 'recovery' ? 'border-zinc-900 hover:border-zinc-800 opacity-60 hover:opacity-100' : ''}
+                    ${isSelected ? 'ring-1 ring-white scale-[1.02] z-10' : ''}
+                  `}
+                >
+                  <div className="flex items-start justify-between mb-3">
+                    <div>
+                      <h3 className="font-bold text-sm text-zinc-100 flex items-center gap-2">
+                        {day.weekday} 
+                        <span className="text-xs font-normal text-zinc-500">{dateLabel}</span>
+                        {isToday && <span className="text-[9px] bg-white text-black px-1.5 rounded font-bold">TODAY</span>}
+                      </h3>
+                      <div className={`mt-1.5 inline-flex text-[10px] px-2 py-0.5 rounded-md font-medium border ${badge.className}`}>
+                        {badge.label}
+                      </div>
                     </div>
+
+                    {hasWorkouts && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleToggleLog(dateStr); }}
+                        className={`flex items-center justify-center w-6 h-6 rounded-full border transition-all z-10 ${isCompleted ? 'bg-emerald-500 border-emerald-500 text-black scale-110' : 'bg-transparent border-zinc-600 text-transparent hover:border-emerald-400 group-hover:text-zinc-600'}`}
+                      >
+                         {isCompleted && "✓"}
+                      </button>
+                    )}
+                  </div>
+                  {hasWorkouts ? (
+                    <ul className={`text-xs space-y-2 ${isCompleted ? 'text-zinc-500 line-through opacity-70' : 'text-zinc-300'}`}>
+                      {day.workouts.slice(0, 3).map((w, i) => (
+                        <li key={i} className="leading-snug pl-2 border-l-2 border-zinc-800">{w}</li>
+                      ))}
+                    </ul>
+                  ) : (<p className="text-xs text-zinc-600 italic mt-2">Active recovery</p>)}
                 </div>
               );
             })}
           </div>
-      <RestTimer isActive={triggerRest} onReset={() => setTriggerRest(false)} />
+
+          {/* Adjust Plan */}
+          {viewingTab === 'current' && !generationError && (
+            <div className="mt-8 pt-6 border-t border-zinc-900">
+               {!showAdjustBox ? (
+                 <div className="flex justify-center">
+                   <button onClick={() => setShowAdjustBox(true)} className="text-xs text-zinc-500 hover:text-zinc-300 transition underline decoration-zinc-700 hover:decoration-zinc-400">
+                     Need to adjust this week's plan?
+                   </button>
+                 </div>
+               ) : (
+                 <div className="bg-zinc-900/50 border border-zinc-800 rounded-2xl p-4 max-w-lg mx-auto animate-in fade-in slide-in-from-bottom-2">
+                   <div className="flex justify-between items-start mb-3">
+                     <p className="text-xs text-zinc-400">Tell Motiva what changed...</p>
+                     <button onClick={() => setShowAdjustBox(false)} className="text-zinc-500 hover:text-white">✕</button>
+                   </div>
+                   <textarea
+                     className="w-full bg-black border border-zinc-700 rounded-xl p-3 text-sm text-white focus:ring-1 focus:ring-white outline-none"
+                     rows={2}
+                     value={regenerateReason}
+                     onChange={(e) => setRegenerateReason(e.target.value)}
+                   />
+                   <div className="flex justify-end mt-3">
+                     <button onClick={handleGenerate} disabled={generating} className="bg-white text-black text-xs font-bold px-4 py-2 rounded-lg hover:bg-zinc-200 disabled:opacity-50">
+                       {generating ? 'Updating...' : 'Update Plan'}
+                     </button>
+                   </div>
+                 </div>
+               )}
+            </div>
+          )}
+
+          {/* Plan Next Week - Only show late in the week */}
+          {viewingTab === 'current' && !nextWeekPlan && showNextWeekBtn && (
+             <div className="mt-6 p-5 border border-zinc-800 rounded-2xl bg-zinc-900/30 flex justify-between items-center">
+               <div className="text-sm text-zinc-400">Ready to plan ahead?</div>
+               <button onClick={() => router.push('/plan-next')} className="text-xs bg-white text-black px-4 py-3 rounded-xl font-bold hover:bg-zinc-200 transition">Plan Next Week →</button>
+             </div>
+          )}
+          
+          {viewingTab === 'current' && nextWeekPlan && (
+            <div className="mt-8 text-center text-xs text-zinc-500">
+              Your next week is ready. Switch tabs above to view it. ↗
+            </div>
+          )}
+
+        </section>
+      ) : (
+        /* Empty State / First Load */
+        !generationError && (
+            <div className="flex flex-col items-center justify-center py-24 text-center space-y-5 animate-in fade-in zoom-in-95 duration-500">
+            <div className="w-16 h-16 bg-zinc-900 rounded-full flex items-center justify-center text-3xl mb-2">⚡️</div>
+            <h2 className="text-xl font-bold text-white">Let's build your first week</h2>
+            <p className="text-sm text-zinc-400 max-w-xs leading-relaxed">
+                Motiva will create a custom plan based on your profile and equipment.
+            </p>
+            <button
+                onClick={handleGenerate}
+                disabled={generating}
+                className="mt-4 px-8 py-4 bg-white text-black text-sm font-bold rounded-full hover:bg-zinc-200 transition disabled:opacity-50 shadow-[0_0_20px_rgba(255,255,255,0.15)]"
+            >
+                {generating ? 'Building Plan...' : 'Generate Plan'}
+            </button>
+            </div>
+        )
+      )}
+
+      {/* Details Modal */}
+      {selectedDay && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/80 backdrop-blur-sm" onClick={() => setSelectedDay(null)}>
+          <div 
+            className="bg-zinc-950 w-full max-w-lg rounded-t-3xl sm:rounded-3xl border border-zinc-800 p-6 shadow-2xl animate-in slide-in-from-bottom-10"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h3 className="text-2xl font-bold text-white">{selectedDay.weekday}</h3>
+                <p className="text-xs text-zinc-500 uppercase tracking-wider font-bold mt-1">Detailed Breakdown</p>
+              </div>
+              <button onClick={() => setSelectedDay(null)} className="p-2 bg-zinc-900 rounded-full text-zinc-400 hover:text-white transition">✕</button>
+            </div>
+
+            <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-2 custom-scrollbar">
+              {selectedDay.detailed_workouts && selectedDay.detailed_workouts.length > 0 ? (
+                selectedDay.detailed_workouts.map((dw, i) => (
+                  <div key={i} className="bg-zinc-900/30 border border-zinc-800 rounded-2xl p-5">
+                    <div className="flex justify-between items-start mb-3">
+                      <h4 className="font-bold text-emerald-100 text-lg">{dw.title}</h4>
+                      {dw.duration_min && <span className="text-[10px] bg-zinc-800 px-2 py-1 rounded text-zinc-400 font-bold uppercase tracking-wide">{dw.duration_min} min</span>}
+                    </div>
+                    {dw.instructions && (
+                      <ul className="space-y-3">
+                        {dw.instructions.map((inst, idx) => (
+                          <li key={idx} className="text-sm text-zinc-300 leading-relaxed pl-4 border-l-2 border-zinc-700">{inst}</li>
+                        ))}
+                      </ul>
+                    )}
+                    {dw.notes && <p className="mt-4 text-xs text-zinc-500 italic bg-black/20 p-3 rounded-lg border border-zinc-800/50">{dw.notes}</p>}
+                  </div>
+                ))
+              ) : (
+                <div className="text-center py-10 border border-zinc-800 border-dashed rounded-2xl text-zinc-500">
+                  <p>Rest & Recovery Day 🍵</p>
+                </div>
+              )}
+            </div>
+            
+            {/* Action Button - SMART LOGIC FIXED */}
+            {selectedDay.workouts.length > 0 && (
+              <div className="mt-6 pt-4 border-t border-zinc-900">
+                 <button
+                    onClick={() => {
+                      const d = dateForWeekday(viewedWeekStart, weekStartCode, normalizeWeekday(selectedDay.weekday)!);
+                      const isoDate = toLocalISO(d);
+                      const isCompleted = logs[isoDate]?.status === 'completed';
+
+                      if (isCompleted) {
+                        handleToggleLog(isoDate);
+                        setSelectedDay(null);
+                        return;
+                      }
+
+                      // Check if it's a fixed activity (Pilates/Swimming marked in profile)
+                      const isFixed = profile.fixed_activities?.some(fa => normalizeWeekday(fa.day) === selectedDay.weekday);
+                      
+                      if (isFixed) {
+                         // Fixed activity -> Just toggle done, no live session
+                         handleToggleLog(isoDate);
+                         setSelectedDay(null);
+                         return;
+                      }
+
+                      // Check if live session supported (Includes Cardio/HIIT/Endurance now)
+                      const hasLiveSession = selectedDay.detailed_workouts?.some(dw => {
+                          const f = (dw.focus || '').toLowerCase();
+                          return ['strength', 'hypertrophy', 'mixed', 'resistance', 'cardio', 'endurance', 'mobility', 'hiit', 'recovery'].includes(f) ||
+                                 dw.instructions?.length > 0;
+                      });
+
+                      if (hasLiveSession) {
+                        router.push(`/workout/${isoDate}`);
+                      } else {
+                        handleToggleLog(isoDate);
+                        setSelectedDay(null);
+                      }
+                    }}
+                    className={`w-full py-4 rounded-2xl font-bold text-sm transition shadow-lg flex items-center justify-center gap-2
+                      ${logs[toLocalISO(dateForWeekday(viewedWeekStart, weekStartCode, normalizeWeekday(selectedDay.weekday)!))]?.status === 'completed'
+                        ? 'bg-zinc-800 text-white hover:bg-zinc-700'
+                        : 'bg-emerald-500 text-black hover:bg-emerald-400'}
+                    `}
+                 >
+                   {logs[toLocalISO(dateForWeekday(viewedWeekStart, weekStartCode, normalizeWeekday(selectedDay.weekday)!))]?.status === 'completed' 
+                     ? <span>↺ Mark as Incomplete</span>
+                     : (
+                        // If it's fixed activity, show "Mark Done". Else "Start Session"
+                        profile.fixed_activities?.some(fa => normalizeWeekday(fa.day) === selectedDay.weekday)
+                            ? <span>✓ Mark as Done</span>
+                            : <span>▶ Start Live Session</span>
+                     )}
+                 </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ... Bottom Nav ... */}
+       <nav className="fixed bottom-0 left-0 right-0 bg-black/90 backdrop-blur-lg border-t border-zinc-900 pb-safe pt-3 px-6 pb-6 flex justify-around items-center z-40">
+          <Link href="/dashboard" className="flex flex-col items-center gap-1.5 text-white">
+            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+            </svg>
+            <span className="text-[10px] font-medium">Plan</span>
+          </Link>
+          <Link href="/progress" className="flex flex-col items-center gap-1.5 text-zinc-500 hover:text-white transition-colors">
+            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+            </svg>
+            <span className="text-[10px] font-medium">Progress</span>
+          </Link>
+          <Link href="/settings" className="flex flex-col items-center gap-1.5 text-zinc-500 hover:text-white transition-colors">
+            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+            <span className="text-[10px] font-medium">Settings</span>
+          </Link>
+      </nav>
     </main>
   );
 }

@@ -16,7 +16,6 @@ export default function LandingPage() {
     const checkSession = async () => {
       const { data } = await supabase.auth.getSession();
       if (data.session) {
-        // המשתמש מחובר, נבדוק אם יש לו פרופיל
         const { data: profile } = await supabase
           .from('profiles')
           .select('id')
@@ -38,17 +37,13 @@ export default function LandingPage() {
   const handleGoogleLogin = async () => {
     setLoading(true);
 
-    // מחזיר את הלוגיקה האוטומטית
-    const origin = typeof window !== 'undefined' && window.location.origin 
-      ? window.location.origin 
-      : '';
-      
-    //const redirectTo = `${origin}/auth/callback`;
-    //console.log('Redirecting to:', redirectTo);
-    // אנחנו מגדירים את הכתובת ידנית כדי למנוע טעויות
-    const redirectTo = 'http://192.168.178.22:3000/auth/callback';
-    console.log('Force redirect to:', redirectTo);
+    // התיקון: שימוש בכתובת האמיתית של האתר (בין אם זה לוקאלי או ורסל)
+    const origin = window.location.origin;
     
+    // התיקון: הוספת ?next=/dashboard כדי שה-callback ידע לאן לשלוח אותנו
+    const redirectTo = `${origin}/auth/callback?next=/dashboard`;
+    
+    console.log('Redirecting to:', redirectTo);
 
     await supabase.auth.signInWithOAuth({
       provider: 'google',
@@ -88,10 +83,8 @@ export default function LandingPage() {
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col items-center justify-center px-6 z-10 text-center">
-        
         <div className="w-full max-w-lg space-y-8">
           
-          {/* Hero Text */}
           <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-700">
             <h1 className="text-5xl md:text-6xl font-bold tracking-tight text-white leading-[1.1]">
               Fitness that fits <br/> 
@@ -103,7 +96,6 @@ export default function LandingPage() {
             </p>
           </div>
 
-          {/* Login Button */}
           <div className="animate-in fade-in slide-in-from-bottom-8 duration-1000 delay-100">
             <button
               onClick={handleGoogleLogin}
@@ -114,7 +106,6 @@ export default function LandingPage() {
                 <span>Redirecting...</span>
               ) : (
                 <>
-                  {/* Google Icon SVG */}
                   <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                     <path d="M23.766 12.2764C23.766 11.4607 23.6999 10.6406 23.5588 9.83807H12.24V14.4591H18.7217C18.4528 15.9494 17.5885 17.2678 16.323 18.1056V21.1039H20.19C22.4608 19.0139 23.766 15.9274 23.766 12.2764Z" fill="#4285F4"/>
                     <path d="M12.24 24.0008C15.4765 24.0008 18.2059 22.9382 20.1945 21.1039L16.3275 18.1055C15.2517 18.8375 13.8627 19.252 12.2445 19.252C9.11388 19.252 6.45946 17.1399 5.50705 14.3003H1.5166V17.3912C3.55371 21.4434 7.7029 24.0008 12.24 24.0008Z" fill="#34A853"/>
@@ -131,27 +122,21 @@ export default function LandingPage() {
           </div>
         </div>
       </div>
-
-      {/* Footer Features */}
+      
+      {/* Footer Features (Shortened for brevity but keeping styling) */}
       <div className="p-8 md:p-12 border-t border-zinc-900 bg-black z-10">
         <div className="max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-8 text-center">
           <div className="space-y-2">
             <div className="text-zinc-100 font-semibold text-sm">Adaptive Planning</div>
-            <p className="text-zinc-500 text-xs leading-relaxed max-w-xs mx-auto">
-              Sick? Traveling? Injured? Motiva rebuilds your week instantly to keep you on track.
-            </p>
+            <p className="text-zinc-500 text-xs">Sick? Traveling? Injured? Motiva rebuilds your week instantly.</p>
           </div>
           <div className="space-y-2">
             <div className="text-zinc-100 font-semibold text-sm">Habit First</div>
-            <p className="text-zinc-500 text-xs leading-relaxed max-w-xs mx-auto">
-              We prioritize consistency over intensity. Build the habit of showing up.
-            </p>
+            <p className="text-zinc-500 text-xs">We prioritize consistency over intensity.</p>
           </div>
           <div className="space-y-2">
             <div className="text-zinc-100 font-semibold text-sm">Smart Constraints</div>
-            <p className="text-zinc-500 text-xs leading-relaxed max-w-xs mx-auto">
-              Only have dumbbells? Bad knee? Motiva works around your reality, not against it.
-            </p>
+            <p className="text-zinc-500 text-xs">Motiva works around your reality, not against it.</p>
           </div>
         </div>
       </div>

@@ -5,7 +5,9 @@ import { NextResponse } from 'next/server';
 export async function GET(request: Request) {
   const requestUrl = new URL(request.url);
   const code = requestUrl.searchParams.get('code');
-  const response = NextResponse.redirect(new URL('/dashboard', requestUrl.origin));
+  // התיקון: קליטת היעד (next) או ברירת מחדל לדשבורד
+  const next = requestUrl.searchParams.get('next') ?? '/dashboard';
+  const origin = requestUrl.origin;
 
   if (code) {
     const cookieStore = await cookies();
@@ -20,21 +22,24 @@ export async function GET(request: Request) {
           setAll(cookiesToSet) {
             try {
               cookiesToSet.forEach(({ name, value, options }) => {
-                response.cookies.set(name, value, options);
+                cookieStore.set(name, value, options);
               });
             } catch {
               // The `setAll` method was called from a Server Component.
-              // This can be ignored if you have middleware refreshing
-              // user sessions.
             }
           },
         },
       }
     );
-    // Exchange the code for a session
-    await supabase.auth.exchangeCodeForSession(code);
+    
+    const { error } = await supabase.auth.exchangeCodeForSession(code);
+    
+    if (!error) {
+      // התיקון: הפניה לדשבורד במקום לדף הבית
+      return NextResponse.redirect(`${origin}${next}`);
+    }
   }
 
-  // Redirect to dashboard (dashboard will check if onboarding is needed)
-  return response;
+  // במקרה של שגיאה
+  return NextResponse.redirect(`${origin}/auth/auth-code-error`);
 }
