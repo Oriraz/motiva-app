@@ -297,34 +297,25 @@ export default function DashboardPage() {
     setGenerating(true);
     setGenerationError(null);
 
-    // לוגיקה לחישוב התאריך הנכון לשליחה
     const weekStartCode = normalizeWeekday(profile.week_start_dow) ?? 'Mon';
     const startOfWeek = getStartOfWeek(weekStartCode);
     const offset = startOfWeek.getTimezoneOffset() * 60000;
     
-    // זה התאריך של השבוע הנוכחי
     const currentWeekISO = new Date(startOfWeek.getTime() - offset).toISOString().slice(0, 10);
-    
-    // זה התאריך של שבוע הבא
     const nextWeekDate = new Date(startOfWeek);
     nextWeekDate.setDate(startOfWeek.getDate() + 7);
     const nextWeekISO = new Date(nextWeekDate.getTime() - offset).toISOString().slice(0, 10);
     
-    // ברירת מחדל: נוכחי
     let targetDateISO = currentWeekISO;
     
-    // אם הטאב הוא 'next', ברור שאנחנו רוצים את שבוע הבא
     if (viewingTab === 'next') {
         targetDateISO = nextWeekISO;
     } 
-    // אם אנחנו ב-Current אבל אין סיבה לתיקון (regenerateReason ריק) וכבר יש לנו תוכנית,
-    // זה אומר שלחצנו על הכפתור "Generate Plan" הראשוני או "Plan Next Week", אז הכוונה היא לשבוע הבא.
     else if (!regenerateReason && currentWeekPlan) {
         targetDateISO = nextWeekISO;
     }
 
     try {
-      // אנחנו שולחים ל-API בדיוק את המבנה שהוא מכיר ואוהב
       const res = await fetch('/api/generate-week', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -333,6 +324,7 @@ export default function DashboardPage() {
           lastWeek: regenerateReason ? null : currentWeekPlan,
           planning: null, 
           changeReason: regenerateReason || null,
+          trainingWeekNumber: trainingWeekNumber,
           weekStartDate: targetDateISO 
         }),
       });
@@ -342,13 +334,8 @@ export default function DashboardPage() {
         throw new Error(err.error || 'Failed to generate plan');
       }
       
-      // טיפול בתשובה מה-API
       const data = await res.json();
       
-      // ה-API שלך מחזיר { notes, days, ... } ולא שומר לדאטאבייס בעצמו!
-      // הדשבורד צריך לשמור את זה לדאטאבייס.
-      // (זה ההבדל המרכזי בין הגרסאות)
-
       const planToSave = {
           notes: data.notes,
           days: data.days
@@ -356,17 +343,18 @@ export default function DashboardPage() {
 
       const { error: dbError } = await supabase
           .from('week_plans')
-          .insert({
+          .upsert({
               user_id: profile.id,
               week_start_date: targetDateISO,
               goal: profile.goal || 'General',
               plan: planToSave,
               generated_at: new Date().toISOString()
+          }, { 
+              onConflict: 'user_id, week_start_date'
           });
 
       if (dbError) throw dbError;
 
-      // רענון העמוד כדי לראות את התוכנית החדשה
       window.location.reload();
 
     } catch (err: any) {
@@ -408,7 +396,6 @@ export default function DashboardPage() {
   const planCreatedDate = generatedAt ? new Date(generatedAt) : new Date();
   planCreatedDate.setHours(0,0,0,0);
   
-  // Logic to show "Plan Next Week" only late in week
   const currentDayIndex = DOW_ORDER.indexOf(normalizeWeekday(new Date().toLocaleDateString('en-US', {weekday:'short'}))!);
   const startDayIndex = DOW_ORDER.indexOf(weekStartCode);
   const daysIntoWeek = (currentDayIndex - startDayIndex + 7) % 7;
@@ -472,7 +459,11 @@ export default function DashboardPage() {
               const dateStr = toLocalISO(dateObj);
               const dateLabel = dateObj.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit' });
               
-              const isToday = dateObj.getTime() === today.getTime();
+              // חישוב האם יום זה הוא בעתיד
+              const checkDate = new Date(dateObj);
+              checkDate.setHours(0,0,0,0);
+              const isFuture = checkDate.getTime() > today.getTime();
+              const isToday = checkDate.getTime() === today.getTime();
               
               const kind = inferKind(day);
               const isFixedActivity = profile.fixed_activities?.some(fa => normalizeWeekday(fa.day) === day.weekday);
@@ -511,8 +502,15 @@ export default function DashboardPage() {
 
                     {hasWorkouts && (
                       <button
-                        onClick={(e) => { e.stopPropagation(); handleToggleLog(dateStr); }}
-                        className={`flex items-center justify-center w-6 h-6 rounded-full border transition-all z-10 ${isCompleted ? 'bg-emerald-500 border-emerald-500 text-black scale-110' : 'bg-transparent border-zinc-600 text-transparent hover:border-emerald-400 group-hover:text-zinc-600'}`}
+                        onClick={(e) => { 
+                            e.stopPropagation(); 
+                            if (!isFuture) handleToggleLog(dateStr); 
+                        }}
+                        // אם זה עתיד - הופכים את הכפתור לבלתי נראה ולא לחיץ
+                        className={`flex items-center justify-center w-6 h-6 rounded-full border transition-all z-10 
+                            ${isFuture ? 'opacity-0 pointer-events-none' : ''} 
+                            ${isCompleted ? 'bg-emerald-500 border-emerald-500 text-black scale-110' : 'bg-transparent border-zinc-600 text-transparent hover:border-emerald-400 group-hover:text-zinc-600'}`
+                        }
                       >
                          {isCompleted && "✓"}
                       </button>

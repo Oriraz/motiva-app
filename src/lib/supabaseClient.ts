@@ -4,6 +4,11 @@ import { createBrowserClient } from '@supabase/ssr';
 let client: ReturnType<typeof createBrowserClient> | undefined;
 
 export const supabaseBrowser = () => {
+  // --- דיבוג זמני: בדיקה לאיזה פרויקט אנחנו מחוברים ---
+  // הערך הזה יודפס ב-Console של הדפדפן (F12)
+  console.log("🔌 Supabase URL:", process.env.NEXT_PUBLIC_SUPABASE_URL); 
+  // ---------------------------------------------------
+  
   // אם כבר יש חיבור קיים - תחזיר אותו (אל תיצור חדש!)
   if (client) return client;
 
