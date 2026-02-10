@@ -26,6 +26,7 @@ export default function OnboardingPage() {
   const supabase = supabaseBrowser();
   const router = useRouter();
 
+  // הוספתי שלב אחד נוסף (סה"כ 5 שלבים)
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
   const [checkingProfile, setCheckingProfile] = useState(true);
@@ -35,13 +36,22 @@ export default function OnboardingPage() {
   const [fullName, setFullName] = useState('');
   const [gender, setGender] = useState('male');
   
-  // שינינו את ברירת המחדל ל- '' כדי שנוכל לבדוק אם המשתמש הזין משהו
   const [age, setAge] = useState<number | ''>('');
   const [weight, setWeight] = useState<number | ''>('');
   const [height, setHeight] = useState<number | ''>('');
 
-  const [goal, setGoal] = useState('get_active');
-  const [level, setLevel] = useState('beginner');
+  // שינוי: מטרות מרובות
+  const [goals, setGoals] = useState<string[]>(['get_active']);
+  const [level, setLevel] = useState('beginner'); // רמה כללית
+  
+  // שינוי: ניסיון ספציפי
+  const [experience, setExperience] = useState({
+    strength: 'beginner',
+    running: 'beginner',
+    cycling: 'beginner',
+    swimming: 'beginner',
+    mobility: 'beginner'
+  });
   
   const [trainingConstraints, setTrainingConstraints] = useState('');
   const [facilities, setFacilities] = useState<string[]>([]);
@@ -51,7 +61,6 @@ export default function OnboardingPage() {
   const [fixedActivities, setFixedActivities] = useState<FixedActivity[]>([]);
 
   // --- Validation Helpers ---
-  // בדיקה האם שלב 1 תקין (כל השדות מולאו)
   const isStep1Valid = () => {
     return (
       fullName.trim().length > 0 &&
@@ -96,10 +105,20 @@ export default function OnboardingPage() {
     };
 
     checkUserAndProfile();
-  }, [supabase, router]); // eslint-disable-line
+  }, [supabase, router]);
 
   const handleNext = () => setStep(prev => prev + 1);
   const handleBack = () => setStep(prev => prev - 1);
+
+  const toggleGoal = (id: string) => {
+    setGoals(prev => {
+        if (prev.includes(id)) {
+            // לא מאפשרים להישאר בלי מטרות בכלל
+            return prev.length > 1 ? prev.filter(g => g !== id) : prev;
+        }
+        return [...prev, id];
+    });
+  };
 
   const toggleFacility = (id: string) => {
     setFacilities(prev => prev.includes(id) ? prev.filter(f => f !== id) : [...prev, id]);
@@ -112,26 +131,39 @@ export default function OnboardingPage() {
   const handleFinish = async () => {
     if (!userId) return;
     
-    // ולידציה סופית לפני שליחה (למקרה שהמשתמש עקף את הכפתור)
     if (!isStep1Valid()) {
       alert("Please fill in all required fields (Age, Weight, Height).");
-      setStep(1); // החזר אותו לשלב 1 לתקן
+      setStep(1); 
       return;
     }
 
     setLoading(true);
 
     try {
+      // יצירת מחרוזת ניסיון מפורטת עבור ה-AI
+      // זה "טריק" שמאפשר לנו לשמור מידע מורכב בתוך שדה טקסט קיים בלי לשנות את מבנה הדאטאבייס
+      const experienceSummary = `
+--- EXPERIENCE LEVELS ---
+Strength: ${experience.strength}
+Running: ${experience.running}
+Cycling: ${experience.cycling}
+Swimming: ${experience.swimming}
+Mobility: ${experience.mobility}
+-------------------------
+INJURIES / CONSTRAINTS:
+${trainingConstraints}
+      `.trim();
+
       const payload = {
         id: userId,
         full_name: fullName,
         gender,
-        age: Number(age),       // בטוח מספר
-        weight_kg: Number(weight), // בטוח מספר
-        height_cm: Number(height), // בטוח מספר
-        goal,
+        age: Number(age),       
+        weight_kg: Number(weight), 
+        height_cm: Number(height), 
+        goal: goals.join(','), // שמירת המטרות כמחרוזת מופרדת בפסיקים
         level,
-        training_constraints: trainingConstraints || null,
+        training_constraints: experienceSummary, // שמירת הניסיון + הפציעות ביחד
         facilities,
         default_max_sessions: defaultSessions,
         default_days_available: defaultDays,
@@ -161,16 +193,16 @@ export default function OnboardingPage() {
   return (
     <main className="min-h-screen bg-black text-white flex flex-col items-center justify-center p-6">
       
-      {/* Progress Bar */}
+      {/* Progress Bar (Updated for 5 steps) */}
       <div className="w-full max-w-lg mb-8">
         <div className="flex justify-between text-xs text-zinc-500 mb-2 uppercase tracking-widest font-medium">
-          <span>Step {step} of 4</span>
-          <span>{Math.round((step / 4) * 100)}%</span>
+          <span>Step {step} of 5</span>
+          <span>{Math.round((step / 5) * 100)}%</span>
         </div>
         <div className="h-1 bg-zinc-900 rounded-full overflow-hidden">
           <div 
             className="h-full bg-white transition-all duration-500 ease-out" 
-            style={{ width: `${(step / 4) * 100}%` }}
+            style={{ width: `${(step / 5) * 100}%` }}
           />
         </div>
       </div>
@@ -257,12 +289,36 @@ export default function OnboardingPage() {
         {step === 2 && (
           <div className="space-y-6">
              <div className="text-center">
-              <h1 className="text-3xl font-bold mb-2">What's your goal?</h1>
-              <p className="text-zinc-400 text-sm">We'll design the week based on this.</p>
+              <h1 className="text-3xl font-bold mb-2">Your Focus</h1>
+              <p className="text-zinc-400 text-sm">Select one or more goals.</p>
             </div>
 
             <div className="space-y-4">
-              <label className="block text-xs text-zinc-400">Current Fitness Level</label>
+              <div className="grid grid-cols-2 gap-2">
+                {[
+                  { id: 'get_active', label: 'Get Active' },
+                  { id: 'lose_weight', label: 'Lose Weight' },
+                  { id: 'build_muscle', label: 'Build Muscle' },
+                  { id: 'improve_endurance', label: 'Endurance' }
+                ].map(g => {
+                  const isSelected = goals.includes(g.id);
+                  return (
+                    <button
+                      key={g.id}
+                      onClick={() => toggleGoal(g.id)}
+                      className={`p-4 rounded-xl border text-sm text-left transition-all ${
+                        isSelected 
+                        ? 'bg-white text-black border-white shadow-lg' 
+                        : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:border-zinc-600'
+                      }`}
+                    >
+                      {isSelected ? '✓ ' : ''}{g.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <label className="block text-xs text-zinc-400 mt-4">Overall Fitness Level</label>
               <div className="grid grid-cols-3 gap-2">
                 {['beginner', 'intermediate', 'advanced'].map(l => (
                   <button
@@ -278,28 +334,6 @@ export default function OnboardingPage() {
                   </button>
                 ))}
               </div>
-
-              <label className="block text-xs text-zinc-400 mt-4">Primary Goal</label>
-              <div className="grid grid-cols-2 gap-2">
-                {[
-                  { id: 'get_active', label: 'Get Active' },
-                  { id: 'lose_weight', label: 'Lose Weight' },
-                  { id: 'build_muscle', label: 'Build Muscle' },
-                  { id: 'improve_endurance', label: 'Endurance' }
-                ].map(g => (
-                  <button
-                    key={g.id}
-                    onClick={() => setGoal(g.id)}
-                    className={`p-4 rounded-xl border text-sm text-left transition-all ${
-                      goal === g.id 
-                      ? 'bg-white text-black border-white' 
-                      : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:border-zinc-600'
-                    }`}
-                  >
-                    {g.label}
-                  </button>
-                ))}
-              </div>
             </div>
 
             <div className="flex gap-3 pt-4">
@@ -309,12 +343,54 @@ export default function OnboardingPage() {
           </div>
         )}
 
-        {/* --- STEP 3: HEALTH & FACILITIES --- */}
+        {/* --- STEP 2.5: SPECIFIC EXPERIENCE (NEW) --- */}
         {step === 3 && (
           <div className="space-y-6">
              <div className="text-center">
+              <h1 className="text-3xl font-bold mb-2">Experience Details</h1>
+              <p className="text-zinc-400 text-sm">Help us tune your workouts accurately.</p>
+            </div>
+
+            <div className="space-y-4 bg-zinc-900/30 p-4 rounded-2xl border border-zinc-800">
+              {['Strength', 'Running', 'Cycling', 'Swimming', 'Mobility'].map((activity) => {
+                const key = activity.toLowerCase() as keyof typeof experience;
+                return (
+                  <div key={key} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-zinc-800/50 pb-3 last:border-0 last:pb-0">
+                    <label className="text-sm font-medium text-zinc-300 w-24">{activity}</label>
+                    <div className="flex gap-1 flex-1">
+                      {['beginner', 'intermediate', 'advanced'].map((lvl) => (
+                        <button
+                          key={lvl}
+                          onClick={() => setExperience(prev => ({ ...prev, [key]: lvl }))}
+                          className={`
+                            flex-1 py-2 px-1 text-[10px] sm:text-xs uppercase font-bold rounded-lg border transition-all
+                            ${experience[key] === lvl 
+                              ? 'bg-indigo-600 text-white border-indigo-500' 
+                              : 'bg-zinc-950 text-zinc-500 border-zinc-800 hover:bg-zinc-800'}
+                          `}
+                        >
+                          {lvl.slice(0, 3)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="flex gap-3 pt-4">
+              <button onClick={handleBack} className="flex-1 bg-zinc-900 text-zinc-400 font-bold py-4 rounded-xl hover:text-white transition">Back</button>
+              <button onClick={handleNext} className="flex-[2] bg-white text-black font-bold py-4 rounded-xl hover:bg-zinc-200 transition">Next Step →</button>
+            </div>
+          </div>
+        )}
+
+        {/* --- STEP 4: HEALTH & FACILITIES --- */}
+        {step === 4 && (
+          <div className="space-y-6">
+             <div className="text-center">
               <h1 className="text-3xl font-bold mb-2">Health & Gear</h1>
-              <p className="text-zinc-400 text-sm">Safety first. What should we know?</p>
+              <p className="text-zinc-400 text-sm">Safety first.</p>
             </div>
 
             <div className="space-y-5">
@@ -360,8 +436,8 @@ export default function OnboardingPage() {
           </div>
         )}
 
-        {/* --- STEP 4: SCHEDULE --- */}
-        {step === 4 && (
+        {/* --- STEP 5: SCHEDULE --- */}
+        {step === 5 && (
           <div className="space-y-6">
              <div className="text-center">
               <h1 className="text-3xl font-bold mb-2">Your Routine</h1>

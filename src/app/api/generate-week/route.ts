@@ -84,6 +84,8 @@ export async function POST(req: Request) {
     
     let effectiveDays = targetDays;
     let isFutureWeek = false;
+    let currentDayStr = 'Start of Week';
+
     if (weekStartDateStr) {
       const startObj = new Date(weekStartDateStr);
       const today = new Date();
@@ -94,6 +96,7 @@ export async function POST(req: Request) {
 
     if (!isFutureWeek) {
        const currentDayIdx = getCurrentDayIndex();
+       currentDayStr = DOW_ORDER[currentDayIdx]; // For prompt context
        const validFutureDays = targetDays.filter(d => DOW_ORDER.indexOf(d) >= currentDayIdx);
        effectiveDays = validFutureDays.length > 0 ? validFutureDays : []; 
     }
@@ -103,6 +106,7 @@ export async function POST(req: Request) {
     const persistentConstraints = profile?.training_constraints || null;
     const userGoal = profile?.goal || 'General Fitness';
     const userLevel = profile?.level || 'beginner';
+    const userFacilities = profile?.facilities || [];
 
     const context = {
       user_profile: {
@@ -111,9 +115,11 @@ export async function POST(req: Request) {
         level: userLevel,
         current_training_week: trainingWeekNum,
         fixed_activities: fixedActivities,
-        ongoing_health_and_constraints: persistentConstraints, 
+        ongoing_health_constraints_and_experience: persistentConstraints, 
+        facilities: userFacilities,
       },
       scheduling_context: {
+        current_day: currentDayStr,
         valid_days_for_workouts: effectiveDays, 
         is_future_plan: isFutureWeek,
         is_adjustment: !!changeReason
@@ -124,7 +130,7 @@ export async function POST(req: Request) {
       },
     };
 
-    // --- 4. THE SYSTEM PROMPT (MERGED & ENHANCED) ---
+    // --- 4. THE UPDATED SYSTEM PROMPT ---
     const systemPrompt = `
 You are "Motiva", an expert AI fitness coach specializing in functional fitness, longevity, and progressive overload.
 
@@ -143,13 +149,24 @@ You are "Motiva", an expert AI fitness coach specializing in functional fitness,
       - Week 9+: Intensification.
 
 **DYNAMIC PRIORITIZATION (GOAL ALIGNMENT):**
-You MUST adapt the mix based on the user's specific 'Goal':
+User may have multiple goals (e.g. "Build Muscle, Endurance"). Balance the plan to address ALL of them.
 * **Muscle/Strength:** Priority = Strength (3-4x/week). Cardio = Maintenance (Zone 2).
 * **Endurance/Running/Triathlon:** Priority = Cardio Volume. Strength = 2x/week (Injury prevention).
 * **Longevity/Health:** Balanced mix (Strength + Cardio + Mobility).
 * **Weight Loss:** High activity volume (Cardio) + Strength (to retain muscle).
 
-**HIIT SAFETY PROTOCOL (CRITICAL):**
+**PARTIAL WEEK RULE (CRITICAL):**
+If 'scheduling_context.is_future_plan' is FALSE (meaning this is the current week), **DO NOT** schedule workouts for days that have already passed (before 'current_day').
+- Focus the plan ONLY on 'valid_days_for_workouts'.
+- Output 'Rest' or leave empty for past days.
+
+**EQUIPMENT LOGIC (CYCLING):**
+If assigning Cycling:
+- Check 'user_profile.facilities'.
+- If 'bicycle' is NOT present but 'gym' or 'home_gym' IS: Specify "Stationary Bike".
+- If 'bicycle' IS present: Specify "Outdoor Cycling or Stationary Bike".
+
+**HIIT SAFETY PROTOCOL:**
 - **Condition:** Do NOT schedule HIIT unless the user level is 'Advanced' OR 'current_training_week' > 8.
 - **Reason:** Prevent burnout/injury.
 - **Default:** Assign Zone 2 (Steady State) Cardio if in doubt.
@@ -182,10 +199,6 @@ ${performanceHistory}
 
 3.  **Mobility:**
     - List specific movements (e.g., "World's Greatest Stretch", "Pigeon Pose").
-
-SCIENCE & BEST PRACTICES:
-- **Cool Down:** Recommend "Active Recovery" (light movement) over static stretching immediately post-workout.
-- **Warm Up:** Dynamic movements only.
 
 **JSON OUTPUT FORMAT:**
 Return ONLY valid JSON.
